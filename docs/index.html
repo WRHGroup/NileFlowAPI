@@ -1,0 +1,722 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Nile Basin Streamflow Explorer</title>
+<style>
+  :root {
+    --bg:#fff; --panel:#f7f8f7; --ink:#1c1c1a; --muted:#6b6b66; --border:#d9dcd7;
+    --ssp126:#2166ac; --ssp126b:#92c5de; --ssp245:#3b8b1f; --ssp245b:#b8e186;
+    --ssp585:#c0392b; --ssp585b:#f4a582;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Arial,sans-serif;color:var(--ink);background:var(--bg);font-size:14px;line-height:1.5}
+  header{padding:14px 18px;border-bottom:1px solid var(--border);background:var(--panel)}
+  header h1{margin:0 0 4px;font-size:18px;font-weight:600}
+  header p{margin:0;color:var(--muted);font-size:13px}
+  .loaders{display:flex;flex-wrap:wrap;gap:16px;padding:12px 18px;border-bottom:1px solid var(--border);align-items:flex-end}
+  .loader label{display:block;font-size:12px;color:var(--muted);margin-bottom:3px}
+  .loader input[type=file]{font-size:12px;max-width:230px}
+  #status{padding:8px 18px;font-size:13px;color:var(--muted);min-height:20px}
+  #status.err{color:#b00020}#status.ok{color:#1a7a3a}
+  main{display:grid;grid-template-columns:minmax(280px,40%) 1fr;gap:0;align-items:stretch;min-height:520px}
+  @media (max-width:820px){main{grid-template-columns:1fr}}
+  #mapWrap{border-right:1px solid var(--border);padding:10px;background:#fbfcfb;position:relative}
+  #map{width:100%;height:100%;min-height:420px;display:block;touch-action:none;cursor:grab}
+  #map.panning{cursor:grabbing}
+  #mapTools{position:absolute;top:16px;right:16px;z-index:5;display:flex;flex-direction:column;gap:4px}
+  #mapTools button{width:30px;height:30px;padding:0;font-size:17px;line-height:1;background:#fff;border:1px solid var(--border);border-radius:6px;cursor:pointer}
+  #mapTools button:hover{background:#eef2ee}
+  #mapTip{position:absolute;z-index:6;pointer-events:none;background:#1c1c1a;color:#fff;font-size:12px;padding:3px 7px;border-radius:5px;opacity:0;transition:opacity .08s;white-space:nowrap;transform:translate(-50%,-130%)}
+  #mapTip.show{opacity:.95}
+  #map path.subbasin{fill:#dce8dc;stroke:#b6c6b6;stroke-width:.4;cursor:pointer}
+  #map path.subbasin:hover{fill:#c3d8c3}
+  #map path.subbasin.sel{fill:#9fc39f;stroke:#4a6b4a;stroke-width:.8}
+  #map path.reach{fill:none;stroke:#3a6fa8;stroke-width:1.1;cursor:pointer}
+  #map path.reach.hit{stroke:transparent;stroke-width:6}
+  #map path.reach:hover{stroke:#d6604d}
+  #map path.reach.sel{stroke:#b5271b;stroke-width:2.4}
+  #panel{padding:12px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+  .row{display:flex;flex-wrap:wrap;gap:14px;align-items:center}
+  .row label.chk{font-size:13px;display:inline-flex;align-items:center;gap:5px;cursor:pointer}
+  select,button,input[type=number]{font-size:13px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:#fff;color:var(--ink)}
+  button{cursor:pointer}button:hover{border-color:#9aa39a}button:disabled{opacity:.5;cursor:default}
+  input[type=number]{width:72px}
+  .seg{display:inline-flex;border:1px solid var(--border);border-radius:6px;overflow:hidden}
+  .seg button{border:none;border-radius:0;background:#fff;padding:6px 12px}
+  .seg button.active{background:#e7efe7;font-weight:600}
+  .swatch{width:22px;height:3px;display:inline-block;vertical-align:middle;border-radius:2px}
+  #chartWrap{position:relative;width:100%;height:430px}
+  #elemTitle{font-size:15px;font-weight:600;margin:2px 0 0}
+  .hint{color:var(--muted);font-size:12px}
+  .legend{display:flex;flex-wrap:wrap;gap:14px;font-size:12px;color:var(--muted)}
+  .legend span{display:inline-flex;align-items:center;gap:5px}
+  .band{width:16px;height:10px;display:inline-block;border-radius:2px;opacity:.55}
+  .ctrl-label{font-size:12px;color:var(--muted)}
+</style>
+</head>
+<body>
+<header>
+  <h1>Nile Basin Streamflow Explorer</h1>
+  <p>Load your HDF5 flow file and the sub-basin / reach shapefiles, then click any element to view its streamflow. All computation runs locally in a background thread — your files never leave your machine.</p>
+</header>
+
+<div class="loaders">
+  <div class="loader">
+    <label>HDF5 flow file (.h5)</label>
+    <input type="file" id="h5file" accept=".h5,.hdf5" />
+  </div>
+  <div class="loader">
+    <label>Sub-basins shapefile (.shp + .dbf, optional .prj)</label>
+    <input type="file" id="basinfiles" accept=".shp,.dbf,.prj" multiple />
+  </div>
+  <div class="loader">
+    <label>Reaches shapefile (.shp + .dbf, optional .prj)</label>
+    <input type="file" id="reachfiles" accept=".shp,.dbf,.prj" multiple />
+  </div>
+  <div class="loader">
+    <label>Or pick an element</label>
+    <select id="elemSelect" disabled><option>— load an .h5 first —</option></select>
+  </div>
+</div>
+
+<div id="status">Waiting for files…</div>
+
+<main>
+  <div id="mapWrap">
+    <div id="mapTools">
+      <button id="zoomIn" title="Zoom in">+</button>
+      <button id="zoomOut" title="Zoom out">−</button>
+      <button id="zoomReset" title="Reset view">⤢</button>
+    </div>
+    <div id="mapTip"></div>
+    <svg id="map" viewBox="0 0 100 100" preserveAspectRatio="xMidYMid meet"></svg>
+  </div>
+  <div id="panel">
+    <div id="elemTitle">No element selected</div>
+
+    <div class="row">
+      <span class="ctrl-label">View:</span>
+      <div class="seg" id="viewSeg">
+        <button data-view="ma" class="active">Moving average</button>
+        <button data-view="annual">Annual mean</button>
+        <button data-view="daily">Daily (raw)</button>
+      </div>
+      <span class="ctrl-label" id="windowCtrl">Window (years):
+        <input type="number" id="windowInput" min="1" max="60" step="1" value="15" />
+      </span>
+    </div>
+
+    <div class="row">
+      <label class="chk"><input type="checkbox" class="sspToggle" data-ssp="ssp126" checked><span class="swatch" style="background:var(--ssp126)"></span>SSP1-2.6</label>
+      <label class="chk"><input type="checkbox" class="sspToggle" data-ssp="ssp245" checked><span class="swatch" style="background:var(--ssp245)"></span>SSP2-4.5</label>
+      <label class="chk"><input type="checkbox" class="sspToggle" data-ssp="ssp585" checked><span class="swatch" style="background:var(--ssp585)"></span>SSP5-8.5</label>
+      <label class="chk"><input type="checkbox" id="showIndiv"> individual projections</label>
+      <label class="chk"><input type="checkbox" id="showBand" checked> percentile band</label>
+      <button id="exportBtn" disabled>Export CSV</button>
+    </div>
+
+    <div class="legend">
+      <span><span class="band" style="background:var(--ssp585b)"></span>10th–90th percentile</span>
+      <span><span class="swatch" style="background:#111;height:3px"></span>ensemble median (bold)</span>
+      <span class="hint" id="viewHint">15-year centred moving average</span>
+    </div>
+
+    <div id="chartWrap"><canvas id="chart" role="img" aria-label="Streamflow time series"></canvas></div>
+    <div class="hint" id="foot">Units: million m³ day⁻¹.</div>
+  </div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/shpjs@6.1.0/dist/shp.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+
+<script id="worker" type="javascript/worker">
+// ===== Web Worker: all HDF5 work happens here, off the main thread =====
+let hdf5 = null, h5 = null, keys = [];
+
+function norm(s){ return String(s).trim().toLowerCase().replace(/[_\s]+/g,"-"); }
+
+async function ensureEngine(){
+  if (hdf5) return;
+  hdf5 = await import("https://esm.sh/h5wasm@0.7.8");
+  await hdf5.ready;
+}
+
+async function openFile(file){
+  const t0 = performance.now();
+  await ensureEngine();
+  const tReady = performance.now();
+  if (h5){ try{ h5.close(); }catch(e){} }
+  try{ hdf5.FS.unlink("data.h5"); }catch(e){}
+
+  let mode = "in-memory";
+  // Prefer lazy WORKERFS mount (no full copy). Works well inside a worker.
+  try{
+    try{ hdf5.FS.mkdir("/work"); }catch(e){}
+    hdf5.FS.mount(hdf5.FS.filesystems.WORKERFS, { files:[file] }, "/work");
+    h5 = new hdf5.File("/work/"+file.name, "r");
+    mode = "lazy";
+  }catch(e){
+    const buf = new Uint8Array(await file.arrayBuffer());
+    hdf5.FS.writeFile("data.h5", buf);
+    h5 = new hdf5.File("data.h5","r");
+  }
+  const tOpen = performance.now();
+  keys = h5.keys();
+  const tKeys = performance.now();
+  postMessage({ type:"opened", keys, mode,
+    timing:{ ready:tReady-t0, open:tOpen-tReady, keys:tKeys-tOpen } });
+}
+
+// Read one pandas DataFrame group and return raw daily columns + years.
+// Only reads the datasets for THIS element (fast, lazy).
+function readGroup(key){
+  const childNames = h5.get(key).keys();
+
+  const axis1 = h5.get(key+"/axis1").value;   // int64 ns
+  const nrows = axis1.length;
+  const rowYear = new Int16Array(nrows);
+  for (let r=0;r<nrows;r++){
+    const ns = typeof axis1[r]==="bigint"?axis1[r]:BigInt(axis1[r]);
+    rowYear[r] = new Date(Number(ns/1000000n)).getUTCFullYear();
+  }
+
+  const blockIdx = [];
+  for (const nm of childNames){ const m=/^block(\d+)_values$/.exec(nm); if(m) blockIdx.push(+m[1]); }
+  blockIdx.sort((a,b)=>a-b);
+
+  const cols = [], colData = [];   // colData[c] = Float64Array of length nrows
+  for (const bi of blockIdx){
+    const items = h5.get(`${key}/block${bi}_items`).value;
+    const vds   = h5.get(`${key}/block${bi}_values`);
+    const values= vds.value, shape=vds.shape, nItems=items.length;
+    let itemsFirst;
+    if (shape[0]===nItems && shape[1]===nrows) itemsFirst=true;
+    else if (shape[0]===nrows && shape[1]===nItems) itemsFirst=false;
+    else itemsFirst = (shape[0]===nItems);
+    const dim1 = shape[1];
+    for (let c=0;c<nItems;c++){
+      const arr = new Float64Array(nrows);
+      if (itemsFirst){ const base=c*dim1; for(let r=0;r<nrows;r++) arr[r]=values[base+r]; }
+      else { for(let r=0;r<nrows;r++) arr[r]=values[r*dim1+c]; }
+      cols.push(String(items[c])); colData.push(arr);
+    }
+  }
+  return { cols, colData, rowYear, nrows };
+}
+
+function loadElement(key){
+  const t0 = performance.now();
+  const { cols, colData, rowYear, nrows } = readGroup(key);
+
+  // Daily datetime (ms) rebuilt from axis1 for the daily view / CSV
+  const axis1 = h5.get(key+"/axis1").value;
+  const dayMs = new Float64Array(nrows);
+  for (let r=0;r<nrows;r++){
+    const ns = typeof axis1[r]==="bigint"?axis1[r]:BigInt(axis1[r]);
+    dayMs[r] = Number(ns/1000000n);
+  }
+
+  // Annual means per column
+  let minYear=Infinity,maxYear=-Infinity;
+  for (let r=0;r<nrows;r++){ const y=rowYear[r]; if(y<minYear)minYear=y; if(y>maxYear)maxYear=y; }
+  const nY = maxYear-minYear+1;
+  const years = new Int16Array(nY);
+  for (let i=0;i<nY;i++) years[i]=minYear+i;
+
+  const annual = [];   // annual[c] = Float64Array(nY)
+  for (let c=0;c<cols.length;c++){
+    const src=colData[c], sums=new Float64Array(nY), cnts=new Float64Array(nY);
+    for (let r=0;r<nrows;r++){ const v=src[r]; if(v===v){ const yi=rowYear[r]-minYear; sums[yi]+=v; cnts[yi]++; } }
+    const a=new Float64Array(nY);
+    for (let yi=0;yi<nY;yi++) a[yi]= cnts[yi]>0 ? sums[yi]/cnts[yi] : NaN;
+    annual.push(a);
+  }
+
+  // Transfer the heavy buffers to the main thread (zero-copy)
+  const transfers = [dayMs.buffer, years.buffer, rowYear.buffer];
+  const colBuffers = colData.map(a=>a.buffer);
+  const annualBuffers = annual.map(a=>a.buffer);
+  transfers.push(...colBuffers, ...annualBuffers);
+
+  postMessage({
+    type:"element", key, cols, nrows, nY,
+    dayMs, years, rowYear,
+    daily: colData, annual,
+    timing:{ read: performance.now()-t0 },
+  }, transfers);
+}
+
+onmessage = async (e)=>{
+  const m = e.data;
+  try{
+    if (m.type==="open") await openFile(m.file);
+    else if (m.type==="element") loadElement(m.key);
+  }catch(err){
+    postMessage({ type:"error", context:m.type, message:String(err&&err.message||err) });
+  }
+};
+</script>
+
+<script>
+// ===================== Main thread (UI) =====================
+const SSPS = ["ssp126","ssp245","ssp585"];
+const SSP_STYLE = {
+  ssp126:{line:"#2166ac",band:"#92c5de",label:"SSP1-2.6"},
+  ssp245:{line:"#3b8b1f",band:"#b8e186",label:"SSP2-4.5"},
+  ssp585:{line:"#c0392b",band:"#f4a582",label:"SSP5-8.5"},
+};
+
+let worker=null, chart=null, h5KeyByNorm=new Map();
+let raw=null;             // last element payload from worker (daily+annual)
+let selectedName=null, viewMode="ma";
+
+const statusEl=document.getElementById("status");
+function setStatus(msg,cls=""){ statusEl.textContent=msg; statusEl.className=cls; }
+const norm = s => String(s).trim().toLowerCase().replace(/[_\s]+/g,"-");
+function parseModelSsp(col){ const m=/_(ssp\d+)$/i.exec(col); return m?{model:col.slice(0,m.index),ssp:m[1].toLowerCase()}:{model:col,ssp:"unknown"}; }
+
+function quantile(a,q){ const n=a.length; if(!n)return NaN; if(n===1)return a[0];
+  const p=(n-1)*q,lo=Math.floor(p),hi=Math.ceil(p); return lo===hi?a[lo]:a[lo]+(a[hi]-a[lo])*(p-lo); }
+
+// Centred moving average over an annual series, window W (odd or even), full-window only
+function rollingMean(a,W){
+  const n=a.length,out=new Float64Array(n).fill(NaN);
+  if(W<=1) return Float64Array.from(a);
+  const left=Math.floor((W-1)/2), right=W-1-left;
+  for(let t=0;t<n;t++){
+    const s=t-left,e=t+right;
+    if(s<0||e>=n) continue;
+    let sum=0,ok=true;
+    for(let k=s;k<=e;k++){ if(!Number.isFinite(a[k])){ok=false;break;} sum+=a[k]; }
+    if(ok) out[t]=sum/W;
+  }
+  return out;
+}
+
+// ---- Build the plot series for the current view from `raw` ----
+function buildSeries(){
+  if(!raw) return null;
+  const W = clampWindow(parseInt(document.getElementById("windowInput").value,10)||15);
+
+  if(viewMode==="daily"){
+    // x = fractional year (numeric, no date adapter needed)
+    const n = raw.dayMs.length;
+    const x = new Float64Array(n);
+    for(let i=0;i<n;i++){
+      const d=new Date(raw.dayMs[i]);
+      const y=d.getUTCFullYear();
+      const start=Date.UTC(y,0,1), end=Date.UTC(y+1,0,1);
+      x[i] = y + (raw.dayMs[i]-start)/(end-start);
+    }
+    const projections = raw.cols.map((name,c)=>{
+      const {model,ssp}=parseModelSsp(name);
+      return {name,model,ssp,y:raw.daily[c]};
+    });
+    return { xType:"num", x, projections, ssps:computeSSPStatsGeneric(projections, n) };
+  }
+
+  // annual or ma → x = years
+  const years = Array.from(raw.years);
+  const projections = raw.cols.map((name,c)=>{
+    const {model,ssp}=parseModelSsp(name);
+    const base = raw.annual[c];
+    const y = viewMode==="ma" ? rollingMean(base,W) : base;
+    return {name,model,ssp,y};
+  });
+  return { xType:"year", x:years, projections, ssps:computeSSPStatsGeneric(projections, years.length) };
+}
+
+function computeSSPStatsGeneric(projections,len){
+  const out={};
+  for(const ssp of SSPS){
+    const members=projections.filter(p=>p.ssp===ssp);
+    if(!members.length) continue;
+    const median=new Float64Array(len).fill(NaN),p10=new Float64Array(len).fill(NaN),p90=new Float64Array(len).fill(NaN);
+    for(let i=0;i<len;i++){
+      const vals=[];
+      for(const m of members){ const v=m.y[i]; if(Number.isFinite(v)) vals.push(v); }
+      if(vals.length){ vals.sort((a,b)=>a-b); median[i]=quantile(vals,.5); p10[i]=quantile(vals,.1); p90[i]=quantile(vals,.9); }
+    }
+    out[ssp]={members:members.map(m=>m.name),median,p10,p90};
+  }
+  return out;
+}
+
+function clampWindow(w){ return Math.max(1,Math.min(60,w)); }
+
+// ---- Chart ----
+function hexA(hex,a){ const h=hex.replace("#","");
+  return `rgba(${parseInt(h.slice(0,2),16)},${parseInt(h.slice(2,4),16)},${parseInt(h.slice(4,6),16)},${a})`; }
+
+function renderChart(){
+  const S=buildSeries();
+  if(!S) return;
+  const activeSsps=SSPS.filter(s=>document.querySelector(`.sspToggle[data-ssp="${s}"]`).checked && S.ssps[s]);
+  const showIndiv=document.getElementById("showIndiv").checked;
+  const showBand=document.getElementById("showBand").checked && viewMode!=="daily";
+  const isNum = S.xType==="num";        // daily → numeric fractional-year x
+  const labels = isNum ? undefined : S.x;
+
+  const datasets=[];
+  const mk=(y)=> isNum ? Array.from(y,(v,i)=>({x:S.x[i],y:Number.isFinite(v)?v:null})) : Array.from(y);
+
+  if(showIndiv){
+    for(const p of S.projections){
+      if(!activeSsps.includes(p.ssp)) continue;
+      datasets.push({label:p.name,data:mk(p.y),borderColor:SSP_STYLE[p.ssp]?.line||"#888",
+        borderWidth:.6,pointRadius:0,tension:.1,spanGaps:false,order:5,_indiv:true});
+    }
+  }
+  if(showBand){
+    for(const ssp of activeSsps){
+      const st=SSP_STYLE[ssp],s=S.ssps[ssp];
+      datasets.push({label:`${st.label} p10`,data:mk(s.p10),borderColor:"rgba(0,0,0,0)",borderWidth:0,pointRadius:0,order:4,_hideLegend:true});
+      datasets.push({label:`${st.label} 10–90%`,data:mk(s.p90),borderColor:"rgba(0,0,0,0)",borderWidth:0,pointRadius:0,backgroundColor:hexA(st.band,.45),fill:"-1",order:4,_hideLegend:true});
+    }
+  }
+  for(const ssp of activeSsps){
+    const st=SSP_STYLE[ssp],s=S.ssps[ssp];
+    datasets.push({label:`${st.label} median`,data:mk(s.median),borderColor:st.line,borderWidth:2.4,pointRadius:0,tension:.1,spanGaps:false,order:1});
+  }
+
+  const cfg={type:"line",data:{labels,datasets},options:{
+    responsive:true,maintainAspectRatio:false,animation:false,
+    parsing:true,
+    interaction:{mode:"nearest",intersect:false},
+    scales:{
+      x: isNum
+        ? {type:"linear",title:{display:true,text:"Year"},ticks:{maxTicksLimit:12,callback:v=>Math.round(v)}}
+        : {title:{display:true,text:"Year"},ticks:{maxTicksLimit:12}},
+      y:{title:{display:true,text:"Streamflow (million m³ day⁻¹)"}},
+    },
+    plugins:{
+      legend:{labels:{filter:it=>{const ds=cfg.data.datasets[it.datasetIndex];return !(ds&&(ds._hideLegend||ds._indiv));},boxWidth:18,font:{size:11}}},
+      tooltip:{callbacks:{title:items=>{ if(!items.length) return "";
+        const xv = isNum ? items[0].parsed.x : items[0].label;
+        return isNum ? `Year ${Math.floor(xv)}` : `Year ${xv}`; }}},
+    },
+  }};
+  if(chart) chart.destroy();
+  chart=new Chart(document.getElementById("chart"),cfg);
+}
+
+// ---- View + window controls ----
+function updateViewHint(){
+  const W=clampWindow(parseInt(document.getElementById("windowInput").value,10)||15);
+  const hint=document.getElementById("viewHint");
+  document.getElementById("windowCtrl").style.display = viewMode==="ma"?"":"none";
+  document.getElementById("showBand").parentElement.style.display = viewMode==="daily"?"none":"";
+  if(viewMode==="ma") hint.textContent=`${W}-year centred moving average`;
+  else if(viewMode==="annual") hint.textContent="annual mean (no smoothing)";
+  else hint.textContent="daily raw values (no smoothing)";
+}
+
+document.getElementById("viewSeg").addEventListener("click",e=>{
+  const b=e.target.closest("button[data-view]"); if(!b) return;
+  viewMode=b.dataset.view;
+  document.querySelectorAll("#viewSeg button").forEach(x=>x.classList.toggle("active",x===b));
+  updateViewHint(); renderChart();
+});
+let winTimer=null;
+document.getElementById("windowInput").addEventListener("input",()=>{
+  clearTimeout(winTimer); winTimer=setTimeout(()=>{ updateViewHint(); renderChart(); },200);
+});
+
+// ---- Worker plumbing ----
+function initWorker(){
+  const src=document.getElementById("worker").textContent;
+  const blob=new Blob([src],{type:"application/javascript"});
+  worker=new Worker(URL.createObjectURL(blob),{type:"module"});
+  worker.onmessage=(e)=>{
+    const m=e.data;
+    if(m.type==="opened"){
+      h5KeyByNorm.clear();
+      for(const k of m.keys) h5KeyByNorm.set(norm(k),k);
+      const t=m.timing;
+      console.log(`[timing] ready ${t.ready.toFixed(0)}ms | open ${t.open.toFixed(0)}ms | keys ${t.keys.toFixed(0)}ms`);
+      setStatus(`HDF5 ready: ${m.keys.length} elements (${m.mode}). Click the map or pick an element.`,"ok");
+      populateSelect(m.keys); refreshMapSelectability();
+    } else if(m.type==="element"){
+      raw=m; selectedName=m.key;
+      document.getElementById("elemTitle").textContent=m.key;
+      document.getElementById("exportBtn").disabled=false;
+      document.getElementById("elemSelect").value=m.key;
+      highlightMap(m.key); updateViewHint(); renderChart();
+      setStatus(`Showing "${m.key}" (read in ${(m.timing.read/1000).toFixed(2)} s).`,"ok");
+    } else if(m.type==="error"){
+      setStatus(`Error (${m.context}): ${m.message}`,"err");
+    }
+  };
+  worker.onerror=(e)=>setStatus("Worker error: "+e.message,"err");
+}
+
+function selectByName(displayName){
+  const key=h5KeyByNorm.get(norm(displayName));
+  selectedName=displayName; highlightMap(displayName);
+  if(!key){ setStatus(`No streamflow data found for "${displayName}".`,"err"); return; }
+  setStatus(`Reading "${key}"…`);
+  worker.postMessage({type:"element",key});
+}
+
+function populateSelect(keys){
+  const sel=document.getElementById("elemSelect"); sel.innerHTML="";
+  [...keys].sort((a,b)=>a.localeCompare(b)).forEach(k=>{
+    const o=document.createElement("option"); o.value=k; o.textContent=k; sel.appendChild(o);
+  });
+  sel.disabled=false; sel.value="";
+}
+
+// ---- Map (SVG) ----
+let basinGeo=null, reachGeo=null;
+let _loggedProps=false;
+function featName(props){
+  if(!props) return "";
+  if(!_loggedProps){ console.log("[shapefile] attribute keys:",Object.keys(props),"example:",props); _loggedProps=true; }
+  // 1) exact-ish "name" match (case-insensitive, ignore surrounding spaces)
+  for(const k of Object.keys(props)){
+    if(k.trim().toLowerCase()==="name"){ const v=props[k]; if(v!=null && String(v).trim()!=="") return String(v).trim(); }
+  }
+  // 2) any key containing "name"
+  for(const k of Object.keys(props)){
+    if(k.toLowerCase().includes("name")){ const v=props[k]; if(v!=null && String(v).trim()!=="") return String(v).trim(); }
+  }
+  // 3) fall back to the first non-empty string-ish value
+  for(const k of Object.keys(props)){
+    const v=props[k]; if(v!=null && typeof v!=="object" && String(v).trim()!=="") return String(v).trim();
+  }
+  return ""; }
+function eachRing(geom,cb){ if(!geom)return; const t=geom.type,c=geom.coordinates;
+  if(t==="Polygon")c.forEach(r=>cb(r)); else if(t==="MultiPolygon")c.forEach(p=>p.forEach(r=>cb(r)));
+  else if(t==="LineString")cb(c); else if(t==="MultiLineString")c.forEach(l=>cb(l)); }
+
+// Minimal dBASE III/IV reader — parses the .dbf attribute table directly,
+// independent of shpjs (whose parseDbf can fail silently in some builds).
+function parseDbfLocal(buf){
+  const dv = new DataView(buf);
+  const dec = new TextDecoder("latin1");
+  const nRecords   = dv.getUint32(4, true);
+  const headerSize = dv.getUint16(8, true);
+  const recordSize = dv.getUint16(10, true);
+
+  const fields = [];
+  let p = 32;                                  // field descriptors start at byte 32
+  while (p < headerSize) {
+    if (dv.getUint8(p) === 0x0D) break;         // 0x0D terminates the field list
+    const nameBytes = new Uint8Array(buf, p, 11);
+    const name = dec.decode(nameBytes).replace(/\u0000[\s\S]*$/, "").trim();
+    const len  = dv.getUint8(p + 16);
+    fields.push({ name, len });
+    p += 32;
+  }
+
+  const records = [];
+  let rp = headerSize;
+  for (let r = 0; r < nRecords; r++) {
+    let off = rp + 1;                           // first byte = deletion flag
+    const rec = {};
+    for (const f of fields) {
+      const bytes = new Uint8Array(buf, off, f.len);
+      rec[f.name] = dec.decode(bytes).trim();
+      off += f.len;
+    }
+    records.push(rec);                          // keep ALL rows → 1:1 with geometry order
+    rp += recordSize;
+  }
+  return records;
+}
+
+async function loadLayer(fileList, layerLabel){
+  const files=[...fileList];
+  const shpFile=files.find(f=>f.name.toLowerCase().endsWith(".shp"));
+  const dbfFile=files.find(f=>f.name.toLowerCase().endsWith(".dbf"));
+  const prjFile=files.find(f=>f.name.toLowerCase().endsWith(".prj"));
+  if(!shpFile) throw new Error("no .shp file selected");
+  if(!dbfFile) throw new Error("no .dbf file selected — select BOTH the .shp and .dbf together (Ctrl/Cmd-click) so element names can be read");
+
+  const prj = prjFile ? await prjFile.text() : undefined;
+  const geoms = window.shp.parseShp(await shpFile.arrayBuffer(), prj);   // array of geometries
+  let records = [];
+  try { records = parseDbfLocal(await dbfFile.arrayBuffer()); }
+  catch(e){ console.warn("[shapefile] DBF parse failed:", e); }
+
+  const features = geoms.map((g,i)=>({
+    type:"Feature",
+    geometry: g && g.type ? g : (g && g.geometry ? g.geometry : g),
+    properties: records[i] || {},
+  }));
+
+  const sampleKeys = features.length ? Object.keys(features[0].properties) : [];
+  let named=0; for(const f of features) if(featName(f.properties)) named++;
+  console.log(`[shapefile] ${layerLabel}: ${features.length} features; fields = [${sampleKeys.join(", ")}]; ${named} named.`);
+  setStatus(`${layerLabel} loaded: ${features.length} features, ${named} named. Fields: ${sampleKeys.join(", ") || "(none)"}.`, named? "ok":"err");
+
+  return {type:"FeatureCollection", features};
+}
+
+let tf=null;
+function computeTransform(){
+  let minx=Infinity,miny=Infinity,maxx=-Infinity,maxy=-Infinity;
+  const scan=geo=>geo&&geo.features.forEach(f=>eachRing(f.geometry,ring=>{for(const[x,y]of ring){if(x<minx)minx=x;if(x>maxx)maxx=x;if(y<miny)miny=y;if(y>maxy)maxy=y;}}));
+  scan(basinGeo);scan(reachGeo);
+  if(!isFinite(minx))return null;
+  const W=1000,H=1000,pad=20,dx=maxx-minx||1,dy=maxy-miny||1;
+  const s=Math.min((W-2*pad)/dx,(H-2*pad)/dy);
+  const offx=pad+((W-2*pad)-dx*s)/2, offy=pad+((H-2*pad)-dy*s)/2;
+  return {W,H,px:x=>offx+(x-minx)*s,py:y=>(H-offy)-(y-miny)*s};
+}
+function ringToPath(ring){ let d=""; for(let i=0;i<ring.length;i++){const[x,y]=ring[i]; d+=(i?"L":"M")+tf.px(x).toFixed(1)+" "+tf.py(y).toFixed(1);} return d; }
+
+// current view box for zoom/pan
+let view={x:0,y:0,w:1000,h:1000};
+function applyView(){ const svg=document.getElementById("map");
+  svg.setAttribute("viewBox",`${view.x} ${view.y} ${view.w} ${view.h}`); }
+
+function tipShow(name,clientX,clientY){
+  const tip=document.getElementById("mapTip"), wrap=document.getElementById("mapWrap");
+  const r=wrap.getBoundingClientRect();
+  tip.textContent=name;
+  tip.style.left=(clientX-r.left)+"px";
+  tip.style.top=(clientY-r.top)+"px";
+  tip.classList.add("show");
+}
+function tipHide(){ document.getElementById("mapTip").classList.remove("show"); }
+
+function attachInteractions(pathEl,name){
+  const hasData = name && h5KeyByNorm.has(norm(name));
+  pathEl.addEventListener("mousemove",ev=>{
+    const label = name ? (name + (hasData?"":"  (no data)")) : "(unnamed feature)";
+    tipShow(label, ev.clientX, ev.clientY);
+  });
+  pathEl.addEventListener("mouseleave",tipHide);
+  pathEl.addEventListener("click",ev=>{
+    ev.stopPropagation();
+    if(name){ selectByName(name); }
+    else { setStatus("This feature has no readable name attribute — reload the layer with its .dbf file, or check the field name in the console log.","err"); }
+  });
+}
+
+function drawMap(){
+  const svg=document.getElementById("map"); svg.innerHTML="";
+  tf=computeTransform(); if(!tf)return;
+  view={x:0,y:0,w:tf.W,h:tf.H}; applyView();
+  const NS="http://www.w3.org/2000/svg";
+  let emptyNames=0;
+
+  if(basinGeo) for(const f of basinGeo.features){
+    const name=featName(f.properties); if(!name) emptyNames++;
+    let d=""; eachRing(f.geometry,ring=>{d+=ringToPath(ring)+"Z";}); if(!d)continue;
+    const p=document.createElementNS(NS,"path"); p.setAttribute("d",d); p.setAttribute("class","subbasin");
+    p.dataset.name=name; attachInteractions(p,name); svg.appendChild(p);
+  }
+  if(reachGeo) for(const f of reachGeo.features){
+    const name=featName(f.properties); if(!name) emptyNames++;
+    let d=""; eachRing(f.geometry,ring=>{d+=ringToPath(ring);}); if(!d)continue;
+    // invisible fat hit-line for easy clicking/hovering
+    const hit=document.createElementNS(NS,"path"); hit.setAttribute("d",d); hit.setAttribute("class","reach hit");
+    hit.dataset.name=name; attachInteractions(hit,name); svg.appendChild(hit);
+    // visible thin line (no pointer events)
+    const p=document.createElementNS(NS,"path"); p.setAttribute("d",d); p.setAttribute("class","reach");
+    p.dataset.name=name; p.style.pointerEvents="none"; svg.appendChild(p);
+  }
+  if(emptyNames) console.warn(`[map] ${emptyNames} feature(s) had no resolvable name — check the [shapefile] attribute keys log above.`);
+  refreshMapSelectability(); if(selectedName) highlightMap(selectedName);
+}
+function highlightMap(displayName){ const nn=norm(displayName);
+  document.querySelectorAll("#map path.subbasin, #map path.reach").forEach(p=>p.classList.toggle("sel",norm(p.dataset.name||"")===nn)); }
+function refreshMapSelectability(){ if(!h5KeyByNorm.size)return;
+  document.querySelectorAll("#map path.subbasin, #map path.reach.hit").forEach(p=>{
+    const has=h5KeyByNorm.has(norm(p.dataset.name||""));
+    p.style.opacity=has?"":(p.classList.contains("subbasin")?"0.55":""); }); }
+
+// ---- Zoom & pan ----
+function zoomAt(factor, cx, cy){
+  // cx,cy in viewBox coords; keep that point fixed while scaling
+  const nw=view.w*factor, nh=view.h*factor;
+  view.x = cx - (cx-view.x)*factor;
+  view.y = cy - (cy-view.y)*factor;
+  view.w = nw; view.h = nh;
+  applyView();
+}
+function svgPoint(clientX,clientY){
+  const svg=document.getElementById("map"); const r=svg.getBoundingClientRect();
+  return { x: view.x + (clientX-r.left)/r.width*view.w,
+           y: view.y + (clientY-r.top)/r.height*view.h };
+}
+function initMapControls(){
+  const svg=document.getElementById("map");
+  svg.addEventListener("wheel",ev=>{ ev.preventDefault();
+    const p=svgPoint(ev.clientX,ev.clientY);
+    zoomAt(ev.deltaY>0?1.15:0.87, p.x, p.y);
+  },{passive:false});
+  let panning=false, moved=false, last=null;
+  svg.addEventListener("pointerdown",ev=>{ panning=true; moved=false; last={x:ev.clientX,y:ev.clientY}; tipHide(); });
+  svg.addEventListener("pointermove",ev=>{ if(!panning)return;
+    const dx=ev.clientX-last.x, dy=ev.clientY-last.y;
+    if(!moved && Math.abs(dx)+Math.abs(dy)<4) return;   // ignore tiny jitter → keep clicks working
+    if(!moved){ moved=true; svg.classList.add("panning"); try{svg.setPointerCapture(ev.pointerId);}catch(e){} }
+    const r=svg.getBoundingClientRect();
+    view.x -= dx/r.width*view.w;
+    view.y -= dy/r.height*view.h;
+    last={x:ev.clientX,y:ev.clientY}; applyView(); });
+  const stop=ev=>{ panning=false; moved=false; svg.classList.remove("panning"); };
+  svg.addEventListener("pointerup",stop); svg.addEventListener("pointercancel",stop);
+  document.getElementById("zoomIn").addEventListener("click",()=>zoomAt(0.8,view.x+view.w/2,view.y+view.h/2));
+  document.getElementById("zoomOut").addEventListener("click",()=>zoomAt(1.25,view.x+view.w/2,view.y+view.h/2));
+  document.getElementById("zoomReset").addEventListener("click",()=>{ if(tf){view={x:0,y:0,w:tf.W,h:tf.H};applyView();} });
+}
+
+// ---- CSV export (respects current view + window) ----
+function exportCSV(){
+  if(!raw) return;
+  const S=buildSeries();
+  const isDaily=viewMode==="daily";
+  const xHeader = isDaily ? "Date" : "Year";
+  const suffix = viewMode==="ma" ? `_MA${clampWindow(parseInt(document.getElementById("windowInput").value,10)||15)}` :
+                 viewMode==="annual" ? "_annual" : "_daily";
+  const cols=[xHeader];
+  for(const p of S.projections) cols.push(p.name+suffix);
+  if(!isDaily) for(const ssp of SSPS) if(S.ssps[ssp]){ const L=SSP_STYLE[ssp].label; cols.push(`${L}_median`,`${L}_p10`,`${L}_p90`); }
+  const lines=[cols.join(",")];
+  const N = S.x.length;
+  for(let i=0;i<N;i++){
+    const xcell = isDaily ? new Date(raw.dayMs[i]).toISOString().slice(0,10) : S.x[i];
+    const row=[ xcell ];
+    for(const p of S.projections) row.push(fmt(p.y[i]));
+    if(!isDaily) for(const ssp of SSPS) if(S.ssps[ssp]){ const s=S.ssps[ssp]; row.push(fmt(s.median[i]),fmt(s.p10[i]),fmt(s.p90[i])); }
+    lines.push(row.join(","));
+  }
+  const blob=new Blob([lines.join("\n")],{type:"text/csv"});
+  const a=document.createElement("a"); a.href=URL.createObjectURL(blob);
+  a.download=`${raw.key}${suffix}.csv`; a.click(); URL.revokeObjectURL(a.href);
+}
+function fmt(v){ return Number.isFinite(v)?(+v).toFixed(4):""; }
+
+// ---- Wire up ----
+document.getElementById("h5file").addEventListener("change",e=>{
+  if(e.target.files[0]){ setStatus("Opening HDF5 in background…"); worker.postMessage({type:"open",file:e.target.files[0]}); }
+});
+document.getElementById("basinfiles").addEventListener("change",async e=>{
+  try{ setStatus("Reading sub-basins…"); basinGeo=await loadLayer(e.target.files,"Sub-basins"); drawMap(); }
+  catch(err){ setStatus("Sub-basin shapefile error: "+err.message,"err"); }
+});
+document.getElementById("reachfiles").addEventListener("change",async e=>{
+  try{ setStatus("Reading reaches…"); reachGeo=await loadLayer(e.target.files,"Reaches"); drawMap(); }
+  catch(err){ setStatus("Reach shapefile error: "+err.message,"err"); }
+});
+document.getElementById("elemSelect").addEventListener("change",e=>{
+  if(e.target.value){ selectedName=e.target.value; highlightMap(e.target.value); selectByName(e.target.value); }
+});
+document.querySelectorAll(".sspToggle").forEach(c=>c.addEventListener("change",renderChart));
+document.getElementById("showIndiv").addEventListener("change",renderChart);
+document.getElementById("showBand").addEventListener("change",renderChart);
+document.getElementById("exportBtn").addEventListener("click",exportCSV);
+
+initWorker();
+initMapControls();
+updateViewHint();
+setStatus("Ready. Load an .h5 file and the shapefiles to begin.");
+</script>
+</body>
+</html>
