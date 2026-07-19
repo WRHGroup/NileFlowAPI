@@ -15,6 +15,9 @@
   header{padding:14px 18px;border-bottom:1px solid var(--border);background:var(--panel)}
   header h1{margin:0 0 4px;font-size:18px;font-weight:600}
   header p{margin:0;color:var(--muted);font-size:13px}
+  header ol.steps{margin:8px 0 0;padding-left:22px;color:var(--ink);font-size:13px}
+  header ol.steps li{margin:3px 0}
+  header .note{margin:8px 0 0;color:var(--muted);font-size:12px}
   .loaders{display:flex;flex-wrap:wrap;gap:16px;padding:12px 18px;border-bottom:1px solid var(--border);align-items:flex-end}
   .loader label{display:block;font-size:12px;color:var(--muted);margin-bottom:3px}
   .loader input[type=file]{font-size:12px;max-width:230px}
@@ -59,21 +62,19 @@
 <body>
 <header>
   <h1>Nile Basin Streamflow Explorer</h1>
-  <p>Load your HDF5 flow file and the sub-basin / reach shapefiles, then click any element to view its streamflow. All computation runs locally in a background thread — your files never leave your machine.</p>
+  <ol class="steps">
+    <!-- TODO: replace the href "XXX" below with the actual download URL for the .h5 file -->
+    <li><strong>Download</strong> the HDF5 naturalized-flow file to your computer: <a id="dlLink" href="XXX">naturalized flow file (.h5)</a>.</li>
+    <li><strong>Select</strong> that file with the “HDF5 flow file (.h5)” button below.</li>
+    <li><strong>Explore:</strong> click any element on the map — a sub-basin or a reach — or pick one from the dropdown, to view its streamflow.</li>
+  </ol>
+  <p class="note">The sub-basin and reach maps load automatically from this site. All computation runs locally in a background thread — your flow data never leaves your machine.</p>
 </header>
 
 <div class="loaders">
   <div class="loader">
-    <label>HDF5 flow file (.h5)</label>
+    <label>HDF5 flow file (.h5) — from your computer</label>
     <input type="file" id="h5file" accept=".h5,.hdf5" />
-  </div>
-  <div class="loader">
-    <label>Sub-basins shapefile (.shp + .dbf, optional .prj)</label>
-    <input type="file" id="basinfiles" accept=".shp,.dbf,.prj" multiple />
-  </div>
-  <div class="loader">
-    <label>Reaches shapefile (.shp + .dbf, optional .prj)</label>
-    <input type="file" id="reachfiles" accept=".shp,.dbf,.prj" multiple />
   </div>
   <div class="loader">
     <label>Or pick an element</label>
@@ -81,7 +82,7 @@
   </div>
 </div>
 
-<div id="status">Waiting for files…</div>
+<div id="status">Loading map layers…</div>
 
 <main>
   <div id="mapWrap">
@@ -266,6 +267,22 @@ const SSP_STYLE = {
   ssp126:{line:"#2166ac",band:"#92c5de",label:"SSP1-2.6"},
   ssp245:{line:"#3b8b1f",band:"#b8e186",label:"SSP2-4.5"},
   ssp585:{line:"#c0392b",band:"#f4a582",label:"SSP5-8.5"},
+};
+
+// Map layers are served from this site so users only supply the local .h5.
+// Expected layout (folder lives INSIDE the Pages folder, next to index.html):
+//     docs/
+//       index.html
+//       shapefiles/
+//         nile_subbasins.shp / .dbf / .prj
+//         reaches.shp / .dbf / .prj
+// `bases` are candidate folders tried in order. Only .shp and .dbf are required;
+// the .prj is optional but recommended.
+const REPO_SHAPEFILES = {
+  enabled: true,
+  bases: ["shapefiles/"],
+  basin: { shp:"nile_subbasins.shp", dbf:"nile_subbasins.dbf", prj:"nile_subbasins.prj" },
+  reach: { shp:"reaches.shp",        dbf:"reaches.dbf",        prj:"reaches.prj" },
 };
 
 let worker=null, chart=null, h5KeyByNorm=new Map();
@@ -527,32 +544,85 @@ function parseDbfLocal(buf){
   return records;
 }
 
-async function loadLayer(fileList, layerLabel){
-  const files=[...fileList];
-  const shpFile=files.find(f=>f.name.toLowerCase().endsWith(".shp"));
-  const dbfFile=files.find(f=>f.name.toLowerCase().endsWith(".dbf"));
-  const prjFile=files.find(f=>f.name.toLowerCase().endsWith(".prj"));
-  if(!shpFile) throw new Error("no .shp file selected");
-  if(!dbfFile) throw new Error("no .dbf file selected — select BOTH the .shp and .dbf together (Ctrl/Cmd-click) so element names can be read");
-
-  const prj = prjFile ? await prjFile.text() : undefined;
-  const geoms = window.shp.parseShp(await shpFile.arrayBuffer(), prj);   // array of geometries
+// Core: build a FeatureCollection from raw shp/dbf buffers (+ optional prj text).
+// Shared by the local-file loader and the repository (fetch) loader.
+function buildLayer(shpBuf, dbfBuf, prjText, layerLabel){
+  const geoms = window.shp.parseShp(shpBuf, prjText);   // array of geometries
   let records = [];
-  try { records = parseDbfLocal(await dbfFile.arrayBuffer()); }
-  catch(e){ console.warn("[shapefile] DBF parse failed:", e); }
-
+  if(dbfBuf){
+    try { records = parseDbfLocal(dbfBuf); }
+    catch(e){ console.warn("[shapefile] DBF parse failed:", e); }
+  }
   const features = geoms.map((g,i)=>({
     type:"Feature",
     geometry: g && g.type ? g : (g && g.geometry ? g.geometry : g),
     properties: records[i] || {},
   }));
-
   const sampleKeys = features.length ? Object.keys(features[0].properties) : [];
   let named=0; for(const f of features) if(featName(f.properties)) named++;
   console.log(`[shapefile] ${layerLabel}: ${features.length} features; fields = [${sampleKeys.join(", ")}]; ${named} named.`);
-  setStatus(`${layerLabel} loaded: ${features.length} features, ${named} named. Fields: ${sampleKeys.join(", ") || "(none)"}.`, named? "ok":"err");
+  return { fc:{type:"FeatureCollection", features}, sampleKeys, named };
+}
 
-  return {type:"FeatureCollection", features};
+// Repository files fetched over HTTP (relative to index.html).
+async function fetchBuffer(url){
+  const res = await fetch(url);
+  if(!res.ok) throw new Error(`${url} → HTTP ${res.status}`);
+  return res.arrayBuffer();
+}
+async function fetchTextOptional(url){
+  try{ const res = await fetch(url); return res.ok ? await res.text() : undefined; }
+  catch(e){ return undefined; }
+}
+// A real .shp starts with the big-endian file code 9994 (0x0000270A).
+function looksLikeShp(buf){
+  if(!buf || buf.byteLength < 100) return false;
+  try{ return new DataView(buf).getInt32(0, false) === 9994; }catch(e){ return false; }
+}
+// GitHub Pages serves LFS-tracked files as small text "pointer" files, not the binary.
+function looksLikeLfsPointer(buf){
+  if(!buf || buf.byteLength > 1024) return false;
+  try{ return new TextDecoder("latin1").decode(new Uint8Array(buf.slice(0,64))).startsWith("version https://git-lfs"); }
+  catch(e){ return false; }
+}
+
+async function loadLayerFromUrls(spec, layerLabel){
+  const bases = REPO_SHAPEFILES.bases && REPO_SHAPEFILES.bases.length ? REPO_SHAPEFILES.bases : [""];
+  const tried = [];
+  let lastErr;
+  for(const base of bases){
+    try{
+      const shpUrl = base + spec.shp;
+      const shpBuf = await fetchBuffer(shpUrl);
+      if(looksLikeLfsPointer(shpBuf))
+        throw new Error(`${shpUrl} is a Git LFS pointer, not the real .shp. GitHub Pages does not serve LFS content — re-commit the shapefiles WITHOUT Git LFS (or host them elsewhere).`);
+      if(!looksLikeShp(shpBuf))
+        throw new Error(`${shpUrl} does not look like a .shp file (magic number missing). It may be a 404 page or a wrong path/filename (check exact spelling and case).`);
+      const dbfBuf  = await fetchBuffer(base + spec.dbf);
+      const prjText = spec.prj ? await fetchTextOptional(base + spec.prj) : undefined;
+      const { fc, named } = buildLayer(shpBuf, dbfBuf, prjText, layerLabel);
+      console.log(`[auto] ${layerLabel} loaded from "${base}" (${fc.features.length} features).`);
+      return { fc, named, base };
+    }catch(e){ tried.push(base + spec.shp); lastErr = e; }
+  }
+  console.error(`[auto] ${layerLabel} failed. Tried: ${tried.join(", ")}`);
+  throw new Error(`${layerLabel}: ${lastErr && lastErr.message ? lastErr.message : "could not be fetched from [" + tried.join(", ") + "]"}`);
+}
+
+// Pull both map layers from the repo so users only supply the local .h5.
+async function autoLoadShapefiles(){
+  if(!REPO_SHAPEFILES.enabled) return { anyLoaded:false, msgs:["disabled"], errors:[] };
+  const msgs=[], errors=[]; let anyLoaded=false;
+  const [basinRes, reachRes] = await Promise.allSettled([
+    loadLayerFromUrls(REPO_SHAPEFILES.basin, "Sub-basins"),
+    loadLayerFromUrls(REPO_SHAPEFILES.reach, "Reaches"),
+  ]);
+  if(basinRes.status==="fulfilled"){ basinGeo=basinRes.value.fc; anyLoaded=true; msgs.push(`sub-basins ${basinGeo.features.length}`); }
+  else { console.warn("[auto] sub-basins failed:", basinRes.reason); msgs.push("sub-basins failed"); errors.push(String(basinRes.reason && basinRes.reason.message || basinRes.reason)); }
+  if(reachRes.status==="fulfilled"){ reachGeo=reachRes.value.fc; anyLoaded=true; msgs.push(`reaches ${reachGeo.features.length}`); }
+  else { console.warn("[auto] reaches failed:", reachRes.reason); msgs.push("reaches failed"); errors.push(String(reachRes.reason && reachRes.reason.message || reachRes.reason)); }
+  if(anyLoaded) drawMap();
+  return { anyLoaded, msgs, errors };
 }
 
 let tf=null;
@@ -697,14 +767,6 @@ function fmt(v){ return Number.isFinite(v)?(+v).toFixed(4):""; }
 document.getElementById("h5file").addEventListener("change",e=>{
   if(e.target.files[0]){ setStatus("Opening HDF5 in background…"); worker.postMessage({type:"open",file:e.target.files[0]}); }
 });
-document.getElementById("basinfiles").addEventListener("change",async e=>{
-  try{ setStatus("Reading sub-basins…"); basinGeo=await loadLayer(e.target.files,"Sub-basins"); drawMap(); }
-  catch(err){ setStatus("Sub-basin shapefile error: "+err.message,"err"); }
-});
-document.getElementById("reachfiles").addEventListener("change",async e=>{
-  try{ setStatus("Reading reaches…"); reachGeo=await loadLayer(e.target.files,"Reaches"); drawMap(); }
-  catch(err){ setStatus("Reach shapefile error: "+err.message,"err"); }
-});
 document.getElementById("elemSelect").addEventListener("change",e=>{
   if(e.target.value){ selectedName=e.target.value; highlightMap(e.target.value); selectByName(e.target.value); }
 });
@@ -716,7 +778,16 @@ document.getElementById("exportBtn").addEventListener("click",exportCSV);
 initWorker();
 initMapControls();
 updateViewHint();
-setStatus("Ready. Load an .h5 file and the shapefiles to begin.");
+(async ()=>{
+  setStatus("Loading map layers from this site…");
+  const r = await autoLoadShapefiles();
+  if(r && r.anyLoaded){
+    setStatus(`Map layers loaded (${r.msgs.join(", ")}). Now choose your local .h5 flow file to begin.`,"ok");
+  } else {
+    const detail = (r && r.errors && r.errors.length) ? "  Details: " + r.errors.join("  |  ") : "";
+    setStatus("Could not load the map layers from this site." + detail + "  (Open the browser console for the exact URLs tried.)","err");
+  }
+})();
 </script>
 </body>
 </html>
