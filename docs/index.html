@@ -4,6 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Nile Basin Streamflow Explorer</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <style>
   :root {
     --bg:#fff; --panel:#f7f8f7; --ink:#1c1c1a; --muted:#6b6b66; --border:#d9dcd7;
@@ -25,21 +26,10 @@
   #status.err{color:#b00020}#status.ok{color:#1a7a3a}
   main{display:grid;grid-template-columns:minmax(280px,40%) 1fr;gap:0;align-items:stretch;min-height:520px}
   @media (max-width:820px){main{grid-template-columns:1fr}}
-  #mapWrap{border-right:1px solid var(--border);padding:10px;background:#fbfcfb;position:relative}
-  #map{width:100%;height:100%;min-height:420px;display:block;touch-action:none;cursor:grab}
-  #map.panning{cursor:grabbing}
-  #mapTools{position:absolute;top:16px;right:16px;z-index:5;display:flex;flex-direction:column;gap:4px}
-  #mapTools button{width:30px;height:30px;padding:0;font-size:17px;line-height:1;background:#fff;border:1px solid var(--border);border-radius:6px;cursor:pointer}
-  #mapTools button:hover{background:#eef2ee}
-  #mapTip{position:absolute;z-index:6;pointer-events:none;background:#1c1c1a;color:#fff;font-size:12px;padding:3px 7px;border-radius:5px;opacity:0;transition:opacity .08s;white-space:nowrap;transform:translate(-50%,-130%)}
-  #mapTip.show{opacity:.95}
-  #map path.subbasin{fill:#dce8dc;stroke:#b6c6b6;stroke-width:.4;cursor:pointer}
-  #map path.subbasin:hover{fill:#c3d8c3}
-  #map path.subbasin.sel{fill:#9fc39f;stroke:#4a6b4a;stroke-width:.8}
-  #map path.reach{fill:none;stroke:#3a6fa8;stroke-width:1.1;cursor:pointer}
-  #map path.reach.hit{stroke:transparent;stroke-width:6}
-  #map path.reach:hover{stroke:#d6604d}
-  #map path.reach.sel{stroke:#b5271b;stroke-width:2.4}
+  #mapWrap{border-right:1px solid var(--border);padding:10px;background:#fbfcfb;position:relative;min-height:480px}
+  #map{position:absolute;top:10px;right:10px;bottom:10px;left:10px;min-height:460px;border-radius:6px;overflow:hidden}
+  .leaflet-container{background:#eef1ee;font:inherit}
+  .leaflet-tooltip.elem-tip{font-size:12px;font-weight:500}
   #panel{padding:12px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
   .row{display:flex;flex-wrap:wrap;gap:14px;align-items:center}
   .row label.chk{font-size:13px;display:inline-flex;align-items:center;gap:5px;cursor:pointer}
@@ -86,13 +76,7 @@
 
 <main>
   <div id="mapWrap">
-    <div id="mapTools">
-      <button id="zoomIn" title="Zoom in">+</button>
-      <button id="zoomOut" title="Zoom out">−</button>
-      <button id="zoomReset" title="Reset view">⤢</button>
-    </div>
-    <div id="mapTip"></div>
-    <svg id="map" viewBox="0 0 100 100" preserveAspectRatio="xMidYMid meet"></svg>
+    <div id="map"></div>
   </div>
   <div id="panel">
     <div id="elemTitle">No element selected</div>
@@ -131,6 +115,7 @@
 
 <script src="https://cdn.jsdelivr.net/npm/shpjs@6.1.0/dist/shp.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
 <script id="worker" type="javascript/worker">
 // ===== Web Worker: all HDF5 work happens here, off the main thread =====
@@ -621,120 +606,121 @@ async function autoLoadShapefiles(){
   else { console.warn("[auto] sub-basins failed:", basinRes.reason); msgs.push("sub-basins failed"); errors.push(String(basinRes.reason && basinRes.reason.message || basinRes.reason)); }
   if(reachRes.status==="fulfilled"){ reachGeo=reachRes.value.fc; anyLoaded=true; msgs.push(`reaches ${reachGeo.features.length}`); }
   else { console.warn("[auto] reaches failed:", reachRes.reason); msgs.push("reaches failed"); errors.push(String(reachRes.reason && reachRes.reason.message || reachRes.reason)); }
-  if(anyLoaded) drawMap();
   return { anyLoaded, msgs, errors };
 }
 
-let tf=null;
-function computeTransform(){
-  let minx=Infinity,miny=Infinity,maxx=-Infinity,maxy=-Infinity;
-  const scan=geo=>geo&&geo.features.forEach(f=>eachRing(f.geometry,ring=>{for(const[x,y]of ring){if(x<minx)minx=x;if(x>maxx)maxx=x;if(y<miny)miny=y;if(y>maxy)maxy=y;}}));
-  scan(basinGeo);scan(reachGeo);
-  if(!isFinite(minx))return null;
-  const W=1000,H=1000,pad=20,dx=maxx-minx||1,dy=maxy-miny||1;
-  const s=Math.min((W-2*pad)/dx,(H-2*pad)/dy);
-  const offx=pad+((W-2*pad)-dx*s)/2, offy=pad+((H-2*pad)-dy*s)/2;
-  return {W,H,px:x=>offx+(x-minx)*s,py:y=>(H-offy)-(y-miny)*s};
+// ---- Map (Leaflet) ----
+// Keyless tile basemaps. Users switch between them with the layer control (top-right).
+const BASEMAPS = {
+  "Light gray":    { url:"https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+                     opts:{ subdomains:"abcd", maxZoom:20, opacity:0.25, attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>' } },
+  "Light color":   { url:"https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png",
+                     opts:{ subdomains:"abcd", maxZoom:20, opacity:0.25, attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>' } },
+  "Streets (OSM)": { url:"https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+                     opts:{ maxZoom:19, opacity:0.25, attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' } },
+  "Terrain":       { url:"https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
+                     opts:{ maxZoom:17, opacity:0.25, subdomains:"abc", attribution:'&copy; <a href="https://opentopomap.org">OpenTopoMap</a> (CC-BY-SA), &copy; OpenStreetMap contributors' } },
+  "Satellite":     { url:"https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+                     opts:{ maxZoom:19, opacity:0.25, attribution:'Imagery &copy; Esri, Maxar, Earthstar Geographics' } },
+};
+const DEFAULT_BASEMAP = "Light gray";
+
+// Feature styles. Basins are translucent so the basemap shows through for context.
+const STYLE = {
+  basin:       { color:"#3f6b3f", weight:0.8, fillColor:"#8ec48e", fillOpacity:0.35 },
+  basinSel:    { color:"#1f3d1f", weight:2,   fillColor:"#4f9e4f", fillOpacity:0.6  },
+  basinNoData: { color:"#9aa39a", weight:0.6, fillColor:"#c9d2c9", fillOpacity:0.15 },
+  reach:       { color:"#2a6cb0", weight:2 },
+  reachSel:    { color:"#b5271b", weight:4.5 },
+  reachNoData: { color:"#9bb2cc", weight:1.2 },
+};
+
+let lmap=null, basinLayer=null, reachLayer=null, dataLatLngBounds=null;
+
+function initMap(){
+  lmap = L.map("map", { zoomControl:true, worldCopyJump:true, minZoom:2 });
+  lmap.setView([10, 31], 4);   // approx Nile Basin centre until data loads
+
+  const layers={}; let added=false;
+  for(const [name,def] of Object.entries(BASEMAPS)){
+    const tl=L.tileLayer(def.url, def.opts); layers[name]=tl;
+    if(name===DEFAULT_BASEMAP){ tl.addTo(lmap); added=true; }
+  }
+  if(!added){ const k=Object.keys(BASEMAPS)[0]; layers[k].addTo(lmap); }
+  L.control.layers(layers, null, { position:"topright", collapsed:true }).addTo(lmap);
+
+  // "Fit to basin" button below the zoom control
+  const fit=L.control({position:"topleft"});
+  fit.onAdd=function(){
+    const div=L.DomUtil.create("div","leaflet-bar");
+    const a=L.DomUtil.create("a","",div);
+    a.href="#"; a.title="Fit to basin"; a.textContent="⤢";
+    a.style.fontSize="16px"; a.style.textAlign="center"; a.style.fontWeight="700";
+    L.DomEvent.on(a,"click",L.DomEvent.stop).on(a,"click",()=>{ if(dataLatLngBounds) lmap.fitBounds(dataLatLngBounds,{padding:[14,14]}); });
+    return div;
+  };
+  fit.addTo(lmap);
+
+  setTimeout(()=>lmap.invalidateSize(),0);
 }
-function ringToPath(ring){ let d=""; for(let i=0;i<ring.length;i++){const[x,y]=ring[i]; d+=(i?"L":"M")+tf.px(x).toFixed(1)+" "+tf.py(y).toFixed(1);} return d; }
 
-// current view box for zoom/pan
-let view={x:0,y:0,w:1000,h:1000};
-function applyView(){ const svg=document.getElementById("map");
-  svg.setAttribute("viewBox",`${view.x} ${view.y} ${view.w} ${view.h}`); }
-
-function tipShow(name,clientX,clientY){
-  const tip=document.getElementById("mapTip"), wrap=document.getElementById("mapWrap");
-  const r=wrap.getBoundingClientRect();
-  tip.textContent=name;
-  tip.style.left=(clientX-r.left)+"px";
-  tip.style.top=(clientY-r.top)+"px";
-  tip.classList.add("show");
+function styleFor(kind, name){
+  const has = h5KeyByNorm.size===0 || (name && h5KeyByNorm.has(norm(name)));
+  if(kind==="basin") return has?STYLE.basin:STYLE.basinNoData;
+  return has?STYLE.reach:STYLE.reachNoData;
 }
-function tipHide(){ document.getElementById("mapTip").classList.remove("show"); }
 
-function attachInteractions(pathEl,name){
-  const hasData = name && h5KeyByNorm.has(norm(name));
-  pathEl.addEventListener("mousemove",ev=>{
-    const label = name ? (name + (hasData?"":"  (no data)")) : "(unnamed feature)";
-    tipShow(label, ev.clientX, ev.clientY);
-  });
-  pathEl.addEventListener("mouseleave",tipHide);
-  pathEl.addEventListener("click",ev=>{
-    ev.stopPropagation();
-    if(name){ selectByName(name); }
-    else { setStatus("This feature has no readable name attribute — reload the layer with its .dbf file, or check the field name in the console log.","err"); }
-  });
+function wireFeature(feature, layer, kind){
+  const name = featName(feature.properties);
+  layer._elemName=name; layer._kind=kind;
+  layer.setStyle(styleFor(kind,name));
+  if(name){
+    const noData = h5KeyByNorm.size>0 && !h5KeyByNorm.has(norm(name));
+    layer.bindTooltip(name+(noData?"  (no data)":""), {sticky:true, className:"elem-tip", direction:"top", opacity:0.95});
+  }
+  layer.on("mouseover", ()=>{ if(norm(name||"")!==norm(selectedName||"")) layer.setStyle(kind==="basin"?{fillColor:"#c3d8c3",fillOpacity:0.55}:{color:"#d6604d"}); });
+  layer.on("mouseout",  ()=>{ if(norm(name||"")!==norm(selectedName||"")) layer.setStyle(styleFor(kind,name)); });
+  layer.on("click", ()=>{ if(name) selectByName(name);
+    else setStatus("This feature has no readable name attribute — check the .dbf field names in the console log.","err"); });
 }
 
 function drawMap(){
-  const svg=document.getElementById("map"); svg.innerHTML="";
-  tf=computeTransform(); if(!tf)return;
-  view={x:0,y:0,w:tf.W,h:tf.H}; applyView();
-  const NS="http://www.w3.org/2000/svg";
-  let emptyNames=0;
+  if(!lmap) return;
+  if(basinLayer){ lmap.removeLayer(basinLayer); basinLayer=null; }
+  if(reachLayer){ lmap.removeLayer(reachLayer); reachLayer=null; }
 
-  if(basinGeo) for(const f of basinGeo.features){
-    const name=featName(f.properties); if(!name) emptyNames++;
-    let d=""; eachRing(f.geometry,ring=>{d+=ringToPath(ring)+"Z";}); if(!d)continue;
-    const p=document.createElementNS(NS,"path"); p.setAttribute("d",d); p.setAttribute("class","subbasin");
-    p.dataset.name=name; attachInteractions(p,name); svg.appendChild(p);
+  if(basinGeo){
+    basinLayer=L.geoJSON(basinGeo, { filter:f=>f&&f.geometry, style:()=>STYLE.basin,
+      onEachFeature:(f,l)=>wireFeature(f,l,"basin") }).addTo(lmap);
   }
-  if(reachGeo) for(const f of reachGeo.features){
-    const name=featName(f.properties); if(!name) emptyNames++;
-    let d=""; eachRing(f.geometry,ring=>{d+=ringToPath(ring);}); if(!d)continue;
-    // invisible fat hit-line for easy clicking/hovering
-    const hit=document.createElementNS(NS,"path"); hit.setAttribute("d",d); hit.setAttribute("class","reach hit");
-    hit.dataset.name=name; attachInteractions(hit,name); svg.appendChild(hit);
-    // visible thin line (no pointer events)
-    const p=document.createElementNS(NS,"path"); p.setAttribute("d",d); p.setAttribute("class","reach");
-    p.dataset.name=name; p.style.pointerEvents="none"; svg.appendChild(p);
+  if(reachGeo){
+    reachLayer=L.geoJSON(reachGeo, { filter:f=>f&&f.geometry, style:()=>STYLE.reach,
+      onEachFeature:(f,l)=>wireFeature(f,l,"reach") }).addTo(lmap);
   }
-  if(emptyNames) console.warn(`[map] ${emptyNames} feature(s) had no resolvable name — check the [shapefile] attribute keys log above.`);
-  refreshMapSelectability(); if(selectedName) highlightMap(selectedName);
-}
-function highlightMap(displayName){ const nn=norm(displayName);
-  document.querySelectorAll("#map path.subbasin, #map path.reach").forEach(p=>p.classList.toggle("sel",norm(p.dataset.name||"")===nn)); }
-function refreshMapSelectability(){ if(!h5KeyByNorm.size)return;
-  document.querySelectorAll("#map path.subbasin, #map path.reach.hit").forEach(p=>{
-    const has=h5KeyByNorm.has(norm(p.dataset.name||""));
-    p.style.opacity=has?"":(p.classList.contains("subbasin")?"0.55":""); }); }
 
-// ---- Zoom & pan ----
-function zoomAt(factor, cx, cy){
-  // cx,cy in viewBox coords; keep that point fixed while scaling
-  const nw=view.w*factor, nh=view.h*factor;
-  view.x = cx - (cx-view.x)*factor;
-  view.y = cy - (cy-view.y)*factor;
-  view.w = nw; view.h = nh;
-  applyView();
+  const b=L.latLngBounds([]);
+  if(basinLayer && basinLayer.getLayers().length) b.extend(basinLayer.getBounds());
+  if(reachLayer && reachLayer.getLayers().length) b.extend(reachLayer.getBounds());
+  if(b.isValid()){ dataLatLngBounds=b; lmap.fitBounds(b,{padding:[14,14]}); }
+
+  refreshMapSelectability();
+  if(selectedName) highlightMap(selectedName);
 }
-function svgPoint(clientX,clientY){
-  const svg=document.getElementById("map"); const r=svg.getBoundingClientRect();
-  return { x: view.x + (clientX-r.left)/r.width*view.w,
-           y: view.y + (clientY-r.top)/r.height*view.h };
+
+function eachElemLayer(cb){
+  if(basinLayer) basinLayer.eachLayer(l=>cb(l,"basin"));
+  if(reachLayer) reachLayer.eachLayer(l=>cb(l,"reach"));
 }
-function initMapControls(){
-  const svg=document.getElementById("map");
-  svg.addEventListener("wheel",ev=>{ ev.preventDefault();
-    const p=svgPoint(ev.clientX,ev.clientY);
-    zoomAt(ev.deltaY>0?1.15:0.87, p.x, p.y);
-  },{passive:false});
-  let panning=false, moved=false, last=null;
-  svg.addEventListener("pointerdown",ev=>{ panning=true; moved=false; last={x:ev.clientX,y:ev.clientY}; tipHide(); });
-  svg.addEventListener("pointermove",ev=>{ if(!panning)return;
-    const dx=ev.clientX-last.x, dy=ev.clientY-last.y;
-    if(!moved && Math.abs(dx)+Math.abs(dy)<4) return;   // ignore tiny jitter → keep clicks working
-    if(!moved){ moved=true; svg.classList.add("panning"); try{svg.setPointerCapture(ev.pointerId);}catch(e){} }
-    const r=svg.getBoundingClientRect();
-    view.x -= dx/r.width*view.w;
-    view.y -= dy/r.height*view.h;
-    last={x:ev.clientX,y:ev.clientY}; applyView(); });
-  const stop=ev=>{ panning=false; moved=false; svg.classList.remove("panning"); };
-  svg.addEventListener("pointerup",stop); svg.addEventListener("pointercancel",stop);
-  document.getElementById("zoomIn").addEventListener("click",()=>zoomAt(0.8,view.x+view.w/2,view.y+view.h/2));
-  document.getElementById("zoomOut").addEventListener("click",()=>zoomAt(1.25,view.x+view.w/2,view.y+view.h/2));
-  document.getElementById("zoomReset").addEventListener("click",()=>{ if(tf){view={x:0,y:0,w:tf.W,h:tf.H};applyView();} });
+function highlightMap(displayName){
+  const nn=norm(displayName);
+  eachElemLayer((l,kind)=>{
+    const sel=norm(l._elemName||"")===nn;
+    l.setStyle(sel ? (kind==="basin"?STYLE.basinSel:STYLE.reachSel) : styleFor(kind,l._elemName));
+    if(sel && l.bringToFront) l.bringToFront();
+  });
+}
+function refreshMapSelectability(){
+  eachElemLayer((l,kind)=>{ if(norm(l._elemName||"")!==norm(selectedName||"")) l.setStyle(styleFor(kind,l._elemName)); });
 }
 
 // ---- CSV export (respects current view + window) ----
@@ -776,12 +762,13 @@ document.getElementById("showBand").addEventListener("change",renderChart);
 document.getElementById("exportBtn").addEventListener("click",exportCSV);
 
 initWorker();
-initMapControls();
+initMap();
 updateViewHint();
 (async ()=>{
   setStatus("Loading map layers from this site…");
   const r = await autoLoadShapefiles();
   if(r && r.anyLoaded){
+    drawMap();
     setStatus(`Map layers loaded (${r.msgs.join(", ")}). Now choose your local .h5 flow file to begin.`,"ok");
   } else {
     const detail = (r && r.errors && r.errors.length) ? "  Details: " + r.errors.join("  |  ") : "";
